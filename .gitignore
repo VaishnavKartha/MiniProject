@@ -1,0 +1,20 @@
+# Python virtual environments
+myenv/
+venv/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Model cache
+.cache/
+models/
+
+# Uploaded videos / generated files
+uploads/
+*.srt
+
+# OS files
+.DS_Store
+Thumbs.db
