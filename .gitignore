@@ -19,3 +19,6 @@ uploads/
 # OS files
 .DS_Store
 Thumbs.db
+
+full_model_extract/
+model_temp_extract/
