@@ -1,3 +1,4 @@
+```
 Python version 3.11 required
 
 create a virtual environment and install the below dependencies in the virtual environment
@@ -15,3 +16,4 @@ After generting the tokens run this command in the terminal:
   huggingface-cli login <!-- This will prompt you to enter your Token generated -->
 
 The model used is a bit heavy (4.5 GB ) and hence may take some time when you first run the application
+```
