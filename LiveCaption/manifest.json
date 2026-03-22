@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Bhasha Live Captions",
+  "version": "1.0",
+  "description": "Live AI audio translation and captioning for any web video.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabCapture",
+    "storage"
+],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
