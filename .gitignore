@@ -15,6 +15,7 @@ models/
 # Uploaded videos / generated files
 uploads/
 *.srt
+.env
 
 # OS files
 .DS_Store

@@ -17,8 +17,8 @@ groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_api_key)
 
 # 3. SPLIT DEVICES
-whisper_device = "cuda"
-translation_device = "cuda"  
+whisper_device = "cuda:0"
+translation_device = "cuda:1"  
 
 print("Loading Faster-Whisper (Large-v3) on: CUDA...")
 # compute_type="float16" forces it to use the GPU's fastest memory mode
@@ -176,50 +176,53 @@ Example:
     return subtitles,phase_times
 
 def process_live_chunk(audio_path, previous_context=""):
-    """Processes a single live audio chunk with VAD and Contextual Memory."""
+    """Processes a single live audio chunk using the fast 8B model for polish."""
     
-    # 1. WHISPER WITH VAD: Strips silence and perfectly pads the audio
+    print("\n🎤 --- New Audio Chunk Received ---")
+    
+    # 1. WHISPER: Transcribe
     segments_generator, info = whisper_model.transcribe(
         audio_path, 
         language="hi",
-        initial_prompt="यह एक हिंदी वीडियो है जिसमें कुछ English शब्दों का प्रयोग किया गया है।",
         vad_filter=True,
-        vad_parameters=dict(
-            min_silence_duration_ms=500, # The "Post-roll" cut
-            speech_pad_ms=300            # The "Pre-roll" buffer
-        )
+        vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=300),
+        condition_on_previous_text=False
     )
     
     hindi_text = " ".join([s.text for s in segments_generator]).strip()
-    
-    # If the VAD filtered out all the noise and found no voice, abort!
+        
     if not hindi_text:
         return ""
+        
+    print(f"🗣️  Whisper: {hindi_text}")
 
-    # 2. INDICTRANS2: Translate locally
+    # 2. INDICTRANS2: Raw Translation
     batch = ip.preprocess_batch([hindi_text], src_lang="hin_Deva", tgt_lang="mal_Mlym")
     inputs = tokenizer(batch, truncation=True, padding="longest", return_tensors="pt").to(translation_device)
     outputs = model.generate(**inputs, max_new_tokens=256, use_cache=False)
     raw_translation = tokenizer.batch_decode(outputs, skip_special_tokens=True)
     formal_malayalam = ip.postprocess_batch(raw_translation, lang="mal_Mlym")[0]
 
-    # 3. GROQ: Cloud Polish with Memory
+    # 3. FAST GROQ POLISH (The missing link!)
     chat_completion = groq_client.chat.completions.create(
         messages=[
             {
                 "role": "system",
-                "content": "You are a real-time Malayalam translator. Fix the machine translation to sound natural. Output ONLY the Malayalam text, no quotes or explanations."
+                "content": "You are a real-time Malayalam translator. Fix the machine translation to sound natural and contextually accurate based on the previous sentence. Output ONLY the Malayalam text."
             },
             {
                 "role": "user",
-                "content": f"[PREVIOUS CONTEXT - DO NOT TRANSLATE]: {previous_context}\n\n[TRANSLATE THIS]:\nHindi: {hindi_text}\nFormal Mal: {formal_malayalam}"
+                "content": f"[PREVIOUS CONTEXT]: {previous_context}\n\n[TRANSLATE THIS]:\nHindi: {hindi_text}\nFormal Mal: {formal_malayalam}"
             }
         ],
-        model="llama-3.3-70b-versatile",
+        model="llama-3.3-70b-versatile", # Swapped to the lightning-fast 8B model
         temperature=0.1, 
     )
     
     natural_malayalam = chat_completion.choices[0].message.content.strip()
     natural_malayalam = re.sub(r'<think>.*?</think>', '', natural_malayalam, flags=re.DOTALL).strip()
+    
+    print(f"✨  Final Mal: {natural_malayalam}")
+    print("-" * 35)
     
     return natural_malayalam

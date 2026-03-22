@@ -15,21 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (isListening) {
             btn.innerText = "Stop Listening";
             btn.classList.add("off");
-            
-            // SECURITY FIX: Add consumerTabId so Chrome allows the content script to use it
-            chrome.tabCapture.getMediaStreamId({ 
-                targetTabId: tab.id,
-                consumerTabId: tab.id 
-            }, (streamId) => {
-                if (streamId) {
-                    chrome.tabs.sendMessage(tab.id, { action: "start_capture", streamId: streamId });
-                } else {
-                    console.error("Could not get Tab Stream ID");
-                    btn.innerText = "Start Listening";
-                    btn.classList.remove("off");
-                    isListening = false;
-                }
-            });
+            chrome.tabs.sendMessage(tab.id, { action: "start_capture" });
         } else {
             btn.innerText = "Start Listening";
             btn.classList.remove("off");

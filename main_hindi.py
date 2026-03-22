@@ -111,22 +111,31 @@ async def live_captions_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("🟢 Live Captioning WebSocket Connected!")
     
+    # 1. THE NEW ADDITION: Initialize the memory state for this session
     conversation_memory = ""
     
     try:
         while True:
             audio_bytes = await websocket.receive_bytes()
             
+            # Ignore tiny header-only chunks
+            if len(audio_bytes) < 2000:
+                print(f"⚠️ Ignored tiny chunk ({len(audio_bytes)} bytes) - waiting for real audio...")
+                continue
+            
+            print(f"📦 Processing valid chunk of {len(audio_bytes)/1024:.2f} KB")
+            
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp_file:
                 tmp_file.write(audio_bytes)
                 temp_audio_path = tmp_file.name
 
-            # Process chunk with rolling memory
+            # 2. THE UPDATE: Pass the memory into your chunk processor
             malayalam_text = process_live_chunk(temp_audio_path, previous_context=conversation_memory)
             
             if malayalam_text:
-                # Save the last bit of text to give context to the NEXT 3-second chunk
+                # 3. THE UPDATE: Save the last 100 characters to give context to the NEXT chunk
                 conversation_memory = malayalam_text[-100:] 
+                
                 await websocket.send_json({"text": malayalam_text})
             
             os.remove(temp_audio_path)
