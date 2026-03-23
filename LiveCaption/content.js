@@ -1,16 +1,18 @@
 // --- CONFIGURATION ---
 // ⚠️ PASTE YOUR CURRENT NGROK HTTPS URL HERE ⚠️
-const API_BASE_URL = "https://unabstractive-surgeonless-jennette.ngrok-free.dev"; 
+const API_BASE_URL = "https://unabstractive-surgeonless-jennette.ngrok-free.dev";
 
 let subtitles = [];
-let audioClips = [];
+let audioClips = [];       // { start, end, buffer: AudioBuffer, played: bool }
 let currentLang = "en";
 let ttsEnabled = false;
 let isFetching = false;
 let ytVideo = null;
+let audioCtx = null;       // single shared AudioContext
+let activeSource = null;   // currently playing AudioBufferSourceNode
 
 // A strict registry to track exactly which 60s blocks we have downloaded
-let downloadedChunks = new Set(); 
+let downloadedChunks = new Set();
 
 // --- 1. SETUP THE UI OVERLAY ---
 const captionContainer = document.createElement('div');
@@ -27,6 +29,36 @@ captionText.style.cssText = `
 `;
 captionContainer.appendChild(captionText);
 
+// --- HELPER: decode all base64 clips into AudioBuffers upfront ---
+async function decodeClips(rawClips, startTime) {
+    const decoded = [];
+    for (const clip of rawClips) {
+        try {
+            const binary = atob(clip.audio_b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            const buffer = await audioCtx.decodeAudioData(bytes.buffer);
+            decoded.push({
+                start: clip.start + startTime,
+                end: clip.end + startTime,
+                buffer,
+                played: false
+            });
+        } catch (e) {
+            console.warn("Bhasha: failed to decode clip", e);
+        }
+    }
+    return decoded;
+}
+
+// --- HELPER: stop any currently playing TTS clip ---
+function stopActiveSource() {
+    if (activeSource) {
+        try { activeSource.stop(); } catch (_) {}
+        activeSource = null;
+    }
+}
+
 // --- 2. LISTEN FOR POPUP CLICK ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "init_captions") {
@@ -42,16 +74,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         subtitles = [];
         audioClips = [];
         downloadedChunks.clear();
-        ytVideo.muted = false; // clean reset before starting 
-        
+        ytVideo.muted = false;
+        stopActiveSource();
+
+        // Create AudioContext on user gesture (required by browsers)
+        if (ttsEnabled) {
+            if (!audioCtx || audioCtx.state === 'closed') {
+                audioCtx = new AudioContext();
+            } else if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
         ytVideo.pause();
-        
+
         const startChunk = Math.floor(ytVideo.currentTime / 60) * 60;
-        downloadedChunks.add(startChunk); 
-        fetchSegment(startChunk, false); 
-        
+        downloadedChunks.add(startChunk);
+        fetchSegment(startChunk, false);
+
         setupVideoListeners();
-        sendResponse({status: "started"});
+        sendResponse({ status: "started" });
     }
 });
 
@@ -59,7 +101,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function fetchSegment(startTime, isBackground = false) {
     if (isFetching) return;
     isFetching = true;
-    
+
     if (!isBackground) {
         captionText.innerText = `⏳ AI is processing 60 seconds of ${currentLang.toUpperCase()} audio...`;
         captionText.style.color = "#fff";
@@ -86,45 +128,41 @@ async function fetchSegment(startTime, isBackground = false) {
         }
 
         const data = await response.json();
-        
+
         if (data.status === "success" && data.captions) {
-            
-            // 🚨 THE FIX: OFFSET THE TIMESTAMPS BY THE CHUNK'S START TIME
+
+            // OFFSET TIMESTAMPS BY CHUNK START TIME
             const offsetCaptions = data.captions.map(caption => ({
                 ...caption,
                 start: caption.start + startTime,
                 end: caption.end + startTime
             }));
-
-            // Append the corrected captions to our master list
             subtitles = subtitles.concat(offsetCaptions);
 
-            // Store TTS clips if they came back
-            if (data.tts_clips) {
-                const offsetClips = data.tts_clips.map(clip => ({
-                    ...clip,
-                    start: clip.start + startTime,
-                    end: clip.end + startTime,
-                    played: false
-                }));
-                audioClips = audioClips.concat(offsetClips);
+            // PRE-DECODE ALL TTS CLIPS INTO AudioBuffers WHILE VIDEO IS STILL PAUSED
+            if (ttsEnabled && data.tts_clips && data.tts_clips.length > 0) {
+                if (!isBackground) {
+                    captionText.innerText = "🔊 Pre-loading Malayalam audio...";
+                }
+                const decoded = await decodeClips(data.tts_clips, startTime);
+                audioClips = audioClips.concat(decoded);
             }
-            
+
             if (!isBackground) {
-                captionText.innerText = "✅ Malayalam Captions Ready! Playing...";
+                captionText.innerText = "✅ Malayalam Ready! Playing...";
                 captionText.style.color = "#10B981";
-                
-                setTimeout(() => { 
-                    captionText.style.color = "#FFD700"; 
+
+                setTimeout(() => {
+                    captionText.style.color = "#FFD700";
                     captionText.innerText = "";
-                    if (ttsEnabled) ytVideo.muted = true; // mute YT audio when TTS is on
-                    ytVideo.play(); 
+                    if (ttsEnabled) ytVideo.muted = true;
+                    ytVideo.play();
                 }, 1500);
             }
         }
     } catch (err) {
         console.error("Bhasha Error:", err);
-        downloadedChunks.delete(startTime); 
+        downloadedChunks.delete(startTime);
         if (!isBackground) {
             captionText.innerText = "❌ Connection Failed. Check Console.";
             captionText.style.color = "#EF4444";
@@ -138,33 +176,33 @@ async function fetchSegment(startTime, isBackground = false) {
 function setupVideoListeners() {
     ytVideo.ontimeupdate = () => {
         const currentSecs = ytVideo.currentTime;
-        let activeCaption = null;
 
+        // CAPTION DISPLAY
+        let activeCaption = null;
         for (let i = 0; i < subtitles.length; i++) {
             if (currentSecs >= subtitles[i].start && currentSecs <= subtitles[i].end) {
                 activeCaption = subtitles[i].natural_text;
                 break;
             }
         }
-
         if (activeCaption) {
             captionText.innerText = activeCaption;
             captionContainer.style.display = 'block';
         } else {
-            captionText.innerText = ""; 
+            captionText.innerText = "";
         }
 
-        // TTS PLAYBACK
-        if (ttsEnabled) {
+        // TTS PLAYBACK — fires pre-decoded AudioBuffers instantly, zero latency
+        if (ttsEnabled && audioCtx) {
             for (let clip of audioClips) {
                 if (!clip.played && currentSecs >= clip.start && currentSecs <= clip.end) {
                     clip.played = true;
-                    const audioBytes = Uint8Array.from(atob(clip.audio_b64), c => c.charCodeAt(0));
-                    const blob = new Blob([audioBytes], { type: "audio/mp3" });
-                    const url = URL.createObjectURL(blob);
-                    const audio = new Audio(url);
-                    audio.play();
-                    audio.onended = () => URL.revokeObjectURL(url);
+                    stopActiveSource();
+                    const source = audioCtx.createBufferSource();
+                    source.buffer = clip.buffer;
+                    source.connect(audioCtx.destination);
+                    source.start(0);
+                    activeSource = source;
                     break;
                 }
             }
@@ -174,11 +212,11 @@ function setupVideoListeners() {
         if (!isFetching) {
             const currentChunk = Math.floor(currentSecs / 60) * 60;
             const nextChunk = currentChunk + 60;
-            
+
             if ((nextChunk - currentSecs < 30) && currentSecs < ytVideo.duration) {
                 if (!downloadedChunks.has(nextChunk)) {
-                    downloadedChunks.add(nextChunk); 
-                    fetchSegment(nextChunk, true); 
+                    downloadedChunks.add(nextChunk);
+                    fetchSegment(nextChunk, true);
                 }
             }
         }
@@ -186,13 +224,26 @@ function setupVideoListeners() {
 
     ytVideo.onseeked = () => {
         if (isFetching) return;
-        
-        const seekChunk = Math.floor(ytVideo.currentTime / 60) * 60;
-        
+
+        // Stop any playing audio immediately on seek
+        stopActiveSource();
+
+        // Reset played state based on new seek position
+        const seekTime = ytVideo.currentTime;
+        for (let clip of audioClips) {
+            clip.played = clip.end < seekTime;
+        }
+
+        const seekChunk = Math.floor(seekTime / 60) * 60;
         if (!downloadedChunks.has(seekChunk)) {
             ytVideo.pause();
             downloadedChunks.add(seekChunk);
             fetchSegment(seekChunk, false);
         }
+    };
+
+    // Stop TTS audio if user manually pauses
+    ytVideo.onpause = () => {
+        stopActiveSource();
     };
 }
