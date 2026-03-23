@@ -12,7 +12,9 @@ let audioCtx = null;       // single shared AudioContext
 let activeSource = null;   // currently playing AudioBufferSourceNode
 
 // A strict registry to track exactly which 60s blocks we have downloaded
-let downloadedChunks = new Set();
+let completedChunks = new Set();
+let fetchingChunks = new Set();
+let isWaitingForData = false;
 
 // --- 1. SETUP THE UI OVERLAY ---
 const captionContainer = document.createElement('div');
@@ -71,13 +73,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         currentLang = request.lang;
         ttsEnabled = request.tts || false;
+        
+        // Reset all data arrays
         subtitles = [];
         audioClips = [];
-        downloadedChunks.clear();
+        
+        // ✅ NEW WAY: Clear our updated tracking sets instead of downloadedChunks
+        completedChunks.clear();
+        fetchingChunks.clear();
+        isWaitingForData = false;
+        
         ytVideo.muted = false;
         stopActiveSource();
 
-        // Create AudioContext on user gesture (required by browsers)
+        // Create AudioContext on user gesture
         if (ttsEnabled) {
             if (!audioCtx || audioCtx.state === 'closed') {
                 audioCtx = new AudioContext();
@@ -89,25 +98,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         ytVideo.pause();
 
         const startChunk = Math.floor(ytVideo.currentTime / 60) * 60;
-        downloadedChunks.add(startChunk);
+        
+        // We removed downloadedChunks.add(startChunk) here because 
+        // the new fetchSegment() handles adding it to fetchingChunks automatically.
         fetchSegment(startChunk, false);
 
         setupVideoListeners();
+        
         sendResponse({ status: "started" });
     }
+    
+    // Keep the port open just in case!
+    return true; 
 });
 
 // --- 3. FETCH DATA FROM KAGGLE ---
 async function fetchSegment(startTime, isBackground = false) {
-    if (isFetching) return;
-    isFetching = true;
+    if (fetchingChunks.has(startTime)) return;
+    fetchingChunks.add(startTime);
 
     if (!isBackground) {
-        captionText.innerText = `⏳ AI is processing 60 seconds of ${currentLang.toUpperCase()} audio...`;
         captionText.style.color = "#fff";
+        captionText.innerText = "🔗 Connecting to AI Server...";
         captionContainer.style.display = 'block';
-    } else {
-        console.log(`Bhasha: Background buffering chunk at ${startTime}s...`);
     }
 
     try {
@@ -117,21 +130,27 @@ async function fetchSegment(startTime, isBackground = false) {
         formData.append("lang", currentLang);
         formData.append("tts", ttsEnabled ? "true" : "false");
 
+        // UI Update: Request sent, waiting for processing
+        if (!isBackground) {
+            captionText.innerText = ttsEnabled 
+                ? `⏳ Extracting Audio & Generating Captions...` 
+                : `⏳ Generating Captions...`;
+        }
+
         const response = await fetch(`${API_BASE_URL}/get-initial-batch`, {
             method: 'POST',
             body: formData
         });
 
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.details || "Backend server error");
-        }
+        if (!response.ok) throw new Error("Backend server error");
 
+        // UI Update: Server responded, downloading payload
+        if (!isBackground) {
+            captionText.innerText = "📥 Downloading Data...";
+        }
         const data = await response.json();
 
         if (data.status === "success" && data.captions) {
-
-            // OFFSET TIMESTAMPS BY CHUNK START TIME
             const offsetCaptions = data.captions.map(caption => ({
                 ...caption,
                 start: caption.start + startTime,
@@ -139,36 +158,40 @@ async function fetchSegment(startTime, isBackground = false) {
             }));
             subtitles = subtitles.concat(offsetCaptions);
 
-            // PRE-DECODE ALL TTS CLIPS INTO AudioBuffers WHILE VIDEO IS STILL PAUSED
             if (ttsEnabled && data.tts_clips && data.tts_clips.length > 0) {
-                if (!isBackground) {
-                    captionText.innerText = "🔊 Pre-loading Malayalam audio...";
-                }
+                if (!isBackground) captionText.innerText = "🔊 Decoding Audio...";
                 const decoded = await decodeClips(data.tts_clips, startTime);
                 audioClips = audioClips.concat(decoded);
             }
 
-            if (!isBackground) {
-                captionText.innerText = "✅ Malayalam Ready! Playing...";
-                captionText.style.color = "#10B981";
+            // Mark as complete
+            completedChunks.add(startTime);
+            fetchingChunks.delete(startTime);
 
+            if (!isBackground) {
+                captionText.innerText = "✅ Ready! Playing...";
+                captionText.style.color = "#10B981";
                 setTimeout(() => {
                     captionText.style.color = "#FFD700";
                     captionText.innerText = "";
                     if (ttsEnabled) ytVideo.muted = true;
+                    // Only force play if we aren't background buffering
                     ytVideo.play();
-                }, 1500);
+                }, 1000);
+            } else if (isWaitingForData) {
+                // AUTO-RESUME: If the video was paused waiting for this background chunk
+                isWaitingForData = false;
+                captionText.innerText = "";
+                ytVideo.play();
             }
         }
     } catch (err) {
         console.error("Bhasha Error:", err);
-        downloadedChunks.delete(startTime);
+        fetchingChunks.delete(startTime);
         if (!isBackground) {
-            captionText.innerText = "❌ Connection Failed. Check Console.";
+            captionText.innerText = "❌ Connection Failed. Retrying on play...";
             captionText.style.color = "#EF4444";
         }
-    } finally {
-        isFetching = false;
     }
 }
 
@@ -176,8 +199,24 @@ async function fetchSegment(startTime, isBackground = false) {
 function setupVideoListeners() {
     ytVideo.ontimeupdate = () => {
         const currentSecs = ytVideo.currentTime;
+        const currentChunk = Math.floor(currentSecs / 60) * 60;
 
-        // CAPTION DISPLAY
+        // 1. AUTO-PAUSE LOGIC (Buffering)
+        if (!completedChunks.has(currentChunk)) {
+            if (!ytVideo.paused) {
+                ytVideo.pause();
+                isWaitingForData = true;
+                captionText.innerText = `⏳ Waiting for AI data...`;
+                captionText.style.color = "#FFD700";
+                captionContainer.style.display = 'block';
+            }
+            if (!fetchingChunks.has(currentChunk)) {
+                fetchSegment(currentChunk, false);
+            }
+            return; // Stop updating captions/audio while we wait
+        }
+
+        // 2. CAPTION DISPLAY
         let activeCaption = null;
         for (let i = 0; i < subtitles.length; i++) {
             if (currentSecs >= subtitles[i].start && currentSecs <= subtitles[i].end) {
@@ -185,65 +224,72 @@ function setupVideoListeners() {
                 break;
             }
         }
+        
         if (activeCaption) {
             captionText.innerText = activeCaption;
             captionContainer.style.display = 'block';
         } else {
-            captionText.innerText = "";
+            // Only hide if we aren't displaying a status message
+            if (!isWaitingForData && !fetchingChunks.size) {
+                captionText.innerText = "";
+            }
         }
 
-        // TTS PLAYBACK — fires pre-decoded AudioBuffers instantly, zero latency
+        // 3. ROBUST TTS PLAYBACK
         if (ttsEnabled && audioCtx) {
             for (let clip of audioClips) {
                 if (!clip.played && currentSecs >= clip.start && currentSecs <= clip.end) {
                     clip.played = true;
                     stopActiveSource();
+                    
                     const source = audioCtx.createBufferSource();
                     source.buffer = clip.buffer;
                     source.connect(audioCtx.destination);
-                    source.start(0);
+                    
+                    // CALCULATE OFFSET: Start audio exactly where the video is
+                    const offset = Math.max(0, currentSecs - clip.start);
+                    source.start(0, offset);
+                    
                     activeSource = source;
                     break;
                 }
             }
         }
 
-        // BACKGROUND BUFFERING LOGIC
-        if (!isFetching) {
-            const currentChunk = Math.floor(currentSecs / 60) * 60;
-            const nextChunk = currentChunk + 60;
-
-            if ((nextChunk - currentSecs < 30) && currentSecs < ytVideo.duration) {
-                if (!downloadedChunks.has(nextChunk)) {
-                    downloadedChunks.add(nextChunk);
-                    fetchSegment(nextChunk, true);
-                }
+        // 4. BACKGROUND BUFFERING
+        const nextChunk = currentChunk + 60;
+        if ((nextChunk - currentSecs < 50) && currentSecs < ytVideo.duration) {
+            if (!completedChunks.has(nextChunk) && !fetchingChunks.has(nextChunk)) {
+                fetchSegment(nextChunk, true);
             }
         }
     };
 
     ytVideo.onseeked = () => {
-        if (isFetching) return;
-
-        // Stop any playing audio immediately on seek
         stopActiveSource();
-
-        // Reset played state based on new seek position
         const seekTime = ytVideo.currentTime;
+        const seekChunk = Math.floor(seekTime / 60) * 60;
+
+        // Reset all clips so the ones after the seek point can be played again
         for (let clip of audioClips) {
             clip.played = clip.end < seekTime;
         }
 
-        const seekChunk = Math.floor(seekTime / 60) * 60;
-        if (!downloadedChunks.has(seekChunk)) {
+        if (!completedChunks.has(seekChunk)) {
             ytVideo.pause();
-            downloadedChunks.add(seekChunk);
             fetchSegment(seekChunk, false);
         }
     };
 
-    // Stop TTS audio if user manually pauses
     ytVideo.onpause = () => {
         stopActiveSource();
+        // FIX SILENCE BUG: If user pauses, we must un-mark the current clip 
+        // so it restarts (from the right offset) when they hit play again.
+        const currentSecs = ytVideo.currentTime;
+        for (let clip of audioClips) {
+            if (currentSecs >= clip.start && currentSecs <= clip.end) {
+                clip.played = false;
+            }
+        }
     };
 }
