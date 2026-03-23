@@ -41,7 +41,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         ttsEnabled = request.tts || false;
         subtitles = [];
         audioClips = [];
-        downloadedChunks.clear(); 
+        downloadedChunks.clear();
+        ytVideo.muted = false; // clean reset before starting 
         
         ytVideo.pause();
         
@@ -116,6 +117,7 @@ async function fetchSegment(startTime, isBackground = false) {
                 setTimeout(() => { 
                     captionText.style.color = "#FFD700"; 
                     captionText.innerText = "";
+                    if (ttsEnabled) ytVideo.muted = true; // mute YT audio when TTS is on
                     ytVideo.play(); 
                 }, 1500);
             }
