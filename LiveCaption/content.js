@@ -5,7 +5,7 @@ const API_BASE_URL = "https://unabstractive-surgeonless-jennette.ngrok-free.dev"
 let subtitles = [];
 let audioClips = [];
 let currentLang = "en";
-let ttsEnabled = true;
+let ttsEnabled = false;
 let isFetching = false;
 let ytVideo = null;
 

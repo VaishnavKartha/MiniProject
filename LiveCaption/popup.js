@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     const loadBtn = document.getElementById('loadBtn');
     const langSelect = document.getElementById('langSelect');
+    const ttsToggle = document.getElementById('ttsToggle');
 
     loadBtn.addEventListener('click', async () => {
         let [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -11,15 +12,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const selectedLang = langSelect.value;
+        const ttsEnabled = ttsToggle.checked;
+
         loadBtn.innerText = "Initializing...";
-        loadBtn.style.backgroundColor = "#F59E0B"; // Yellow warning color
+        loadBtn.style.backgroundColor = "#F59E0B";
         
-        // Tell the content script to pause the video and fetch the data
         chrome.tabs.sendMessage(tab.id, { 
             action: "init_captions", 
-            lang: selectedLang 
+            lang: selectedLang,
+            tts: ttsEnabled
         }, () => {
-            window.close(); // Close the popup so they can watch the video
+            window.close();
         });
     });
 });
