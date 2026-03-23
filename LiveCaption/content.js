@@ -3,7 +3,9 @@
 const API_BASE_URL = "https://unabstractive-surgeonless-jennette.ngrok-free.dev"; 
 
 let subtitles = [];
+let audioClips = [];
 let currentLang = "en";
+let ttsEnabled = false;
 let isFetching = false;
 let ytVideo = null;
 
@@ -36,7 +38,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         captionContainer.style.display = 'block';
 
         currentLang = request.lang;
-        subtitles = []; 
+        ttsEnabled = request.tts || false;
+        subtitles = [];
+        audioClips = [];
         downloadedChunks.clear(); 
         
         ytVideo.pause();
@@ -68,6 +72,7 @@ async function fetchSegment(startTime, isBackground = false) {
         formData.append("video_url", window.location.href);
         formData.append("start_time", startTime);
         formData.append("lang", currentLang);
+        formData.append("tts", ttsEnabled ? "true" : "false");
 
         const response = await fetch(`${API_BASE_URL}/get-initial-batch`, {
             method: 'POST',
@@ -92,6 +97,17 @@ async function fetchSegment(startTime, isBackground = false) {
 
             // Append the corrected captions to our master list
             subtitles = subtitles.concat(offsetCaptions);
+
+            // Store TTS clips if they came back
+            if (data.tts_clips) {
+                const offsetClips = data.tts_clips.map(clip => ({
+                    ...clip,
+                    start: clip.start + startTime,
+                    end: clip.end + startTime,
+                    played: false
+                }));
+                audioClips = audioClips.concat(offsetClips);
+            }
             
             if (!isBackground) {
                 captionText.innerText = "✅ Malayalam Captions Ready! Playing...";
@@ -134,6 +150,22 @@ function setupVideoListeners() {
             captionContainer.style.display = 'block';
         } else {
             captionText.innerText = ""; 
+        }
+
+        // TTS PLAYBACK
+        if (ttsEnabled) {
+            for (let clip of audioClips) {
+                if (!clip.played && currentSecs >= clip.start && currentSecs <= clip.end) {
+                    clip.played = true;
+                    const audioBytes = Uint8Array.from(atob(clip.audio_b64), c => c.charCodeAt(0));
+                    const blob = new Blob([audioBytes], { type: "audio/mp3" });
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    audio.play();
+                    audio.onended = () => URL.revokeObjectURL(url);
+                    break;
+                }
+            }
         }
 
         // BACKGROUND BUFFERING LOGIC
