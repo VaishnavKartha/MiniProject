@@ -1,124 +1,164 @@
-let socket = null;
-let mediaRecorder = null;
-let stream = null;
+// --- CONFIGURATION ---
+// ⚠️ PASTE YOUR CURRENT NGROK HTTPS URL HERE ⚠️
+const API_BASE_URL = "https://unabstractive-surgeonless-jennette.ngrok-free.dev"; 
 
-// 1. Create the UI Overlay
+let subtitles = [];
+let currentLang = "en";
+let isFetching = false;
+let ytVideo = null;
+
+// A strict registry to track exactly which 60s blocks we have downloaded
+let downloadedChunks = new Set(); 
+
+// --- 1. SETUP THE UI OVERLAY ---
 const captionContainer = document.createElement('div');
 captionContainer.style.cssText = `
-    position: fixed; bottom: 10%; left: 50%; transform: translateX(-50%);
+    position: absolute; bottom: 10%; left: 50%; transform: translateX(-50%);
     width: 80%; text-align: center; pointer-events: none; z-index: 999999; display: none;
 `;
 
 const captionText = document.createElement('div');
 captionText.style.cssText = `
-    display: inline-block; background-color: rgba(0, 0, 0, 0.8); color: white;
-    font-family: 'Noto Sans Malayalam', sans-serif; font-size: 28px; font-weight: bold;
-    padding: 10px 20px; border-radius: 8px; text-shadow: 2px 2px 4px #000000;
+    display: inline-block; background-color: rgba(0, 0, 0, 0.85); color: #FFD700;
+    font-family: 'Noto Sans Malayalam', sans-serif; font-size: 26px; font-weight: bold;
+    padding: 8px 16px; border-radius: 8px; text-shadow: 2px 2px 4px #000;
 `;
-captionText.innerText = "Waiting for audio...";
-
 captionContainer.appendChild(captionText);
-document.body.appendChild(captionContainer);
 
+// --- 2. LISTEN FOR POPUP CLICK ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "start_capture") {
-        startLiveCaptioning();
-    } else if (request.action === "stop_capture") {
-        stopLiveCaptioning();
+    if (request.action === "init_captions") {
+        ytVideo = document.querySelector('video');
+        if (!ytVideo) return;
+
+        const player = document.getElementById('movie_player') || document.body;
+        player.appendChild(captionContainer);
+        captionContainer.style.display = 'block';
+
+        currentLang = request.lang;
+        subtitles = []; 
+        downloadedChunks.clear(); 
+        
+        ytVideo.pause();
+        
+        const startChunk = Math.floor(ytVideo.currentTime / 60) * 60;
+        downloadedChunks.add(startChunk); 
+        fetchSegment(startChunk, false); 
+        
+        setupVideoListeners();
+        sendResponse({status: "started"});
     }
 });
 
-async function startLiveCaptioning() {
-    console.log("🎬 Capturing tab audio...");
+// --- 3. FETCH DATA FROM KAGGLE ---
+async function fetchSegment(startTime, isBackground = false) {
+    if (isFetching) return;
+    isFetching = true;
+    
+    if (!isBackground) {
+        captionText.innerText = `⏳ AI is processing 60 seconds of ${currentLang.toUpperCase()} audio...`;
+        captionText.style.color = "#fff";
+        captionContainer.style.display = 'block';
+    } else {
+        console.log(`Bhasha: Background buffering chunk at ${startTime}s...`);
+    }
+
     try {
-        // THE FIX: These flags force the current YouTube tab to be selectable!
-        stream = await navigator.mediaDevices.getDisplayMedia({
-            video: { displaySurface: "browser" },
-            audio: {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false
-            },
-            selfBrowserSurface: "include", 
-            preferCurrentTab: true         
+        const formData = new FormData();
+        formData.append("video_url", window.location.href);
+        formData.append("start_time", startTime);
+        formData.append("lang", currentLang);
+
+        const response = await fetch(`${API_BASE_URL}/get-initial-batch`, {
+            method: 'POST',
+            body: formData
         });
 
-        const audioTracks = stream.getAudioTracks();
-        if (audioTracks.length === 0) {
-            alert("❌ You forgot to toggle 'Also share tab audio'! Refresh and try again.");
-            stopLiveCaptioning();
-            return;
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.details || "Backend server error");
         }
 
-        captionContainer.style.display = 'block';
-        captionText.innerText = "Connecting to AI Backend...";
-
-        // PASTE YOUR CURRENT NGROK URL HERE
-        const NGROK_URL = 'wss://unabstractive-surgeonless-jennette.ngrok-free.dev/ws/live-captions';
-        socket = new WebSocket(NGROK_URL);
-
-        socket.onopen = () => {
-            captionText.innerText = "Listening... 🎙️";
+        const data = await response.json();
+        
+        if (data.status === "success" && data.captions) {
             
-            // Extract only the audio track so Chrome doesn't crash on video Codecs
-            const audioOnlyStream = new MediaStream([audioTracks[0]]);
+            // 🚨 THE FIX: OFFSET THE TIMESTAMPS BY THE CHUNK'S START TIME
+            const offsetCaptions = data.captions.map(caption => ({
+                ...caption,
+                start: caption.start + startTime,
+                end: caption.end + startTime
+            }));
 
-            function recordNextChunk() {
-                if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
-                try {
-                    let chunkRecorder = new MediaRecorder(audioOnlyStream, { mimeType: 'audio/webm' });
-                    
-                    chunkRecorder.ondataavailable = (event) => {
-                        if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
-                            socket.send(event.data);
-                        }
-                    };
-
-                    chunkRecorder.onstop = () => {
-                        recordNextChunk();
-                    };
-
-                    chunkRecorder.start();
-                    
-                    setTimeout(() => {
-                        if (chunkRecorder.state === "recording") {
-                            chunkRecorder.stop();
-                        }
-                    }, 3000);
-
-                } catch (e) {
-                    console.error("Recorder start failed:", e);
-                }
+            // Append the corrected captions to our master list
+            subtitles = subtitles.concat(offsetCaptions);
+            
+            if (!isBackground) {
+                captionText.innerText = "✅ Malayalam Captions Ready! Playing...";
+                captionText.style.color = "#10B981";
+                
+                setTimeout(() => { 
+                    captionText.style.color = "#FFD700"; 
+                    captionText.innerText = "";
+                    ytVideo.play(); 
+                }, 1500);
             }
-
-            // Kick off the infinite loop!
-            recordNextChunk();
-        };
-
-        socket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.text) {
-                captionText.innerText = data.text;
-            }
-        };
-
-        // If user hits "Stop Sharing" on Chrome's banner
-        stream.getVideoTracks()[0].onended = () => {
-            stopLiveCaptioning();
-        };
-
+        }
     } catch (err) {
-        console.error("Capture error: ", err);
+        console.error("Bhasha Error:", err);
+        downloadedChunks.delete(startTime); 
+        if (!isBackground) {
+            captionText.innerText = "❌ Connection Failed. Check Console.";
+            captionText.style.color = "#EF4444";
+        }
+    } finally {
+        isFetching = false;
     }
 }
 
-function stopLiveCaptioning() {
-    captionContainer.style.display = 'none';
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-    }
-    if (socket) {
-        socket.close();
-    }
+// --- 4. THE SYNC ENGINE ---
+function setupVideoListeners() {
+    ytVideo.ontimeupdate = () => {
+        const currentSecs = ytVideo.currentTime;
+        let activeCaption = null;
+
+        for (let i = 0; i < subtitles.length; i++) {
+            if (currentSecs >= subtitles[i].start && currentSecs <= subtitles[i].end) {
+                activeCaption = subtitles[i].natural_text;
+                break;
+            }
+        }
+
+        if (activeCaption) {
+            captionText.innerText = activeCaption;
+            captionContainer.style.display = 'block';
+        } else {
+            captionText.innerText = ""; 
+        }
+
+        // BACKGROUND BUFFERING LOGIC
+        if (!isFetching) {
+            const currentChunk = Math.floor(currentSecs / 60) * 60;
+            const nextChunk = currentChunk + 60;
+            
+            if ((nextChunk - currentSecs < 30) && currentSecs < ytVideo.duration) {
+                if (!downloadedChunks.has(nextChunk)) {
+                    downloadedChunks.add(nextChunk); 
+                    fetchSegment(nextChunk, true); 
+                }
+            }
+        }
+    };
+
+    ytVideo.onseeked = () => {
+        if (isFetching) return;
+        
+        const seekChunk = Math.floor(ytVideo.currentTime / 60) * 60;
+        
+        if (!downloadedChunks.has(seekChunk)) {
+            ytVideo.pause();
+            downloadedChunks.add(seekChunk);
+            fetchSegment(seekChunk, false);
+        }
+    };
 }

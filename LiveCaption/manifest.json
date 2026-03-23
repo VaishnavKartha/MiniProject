@@ -1,20 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "Bhasha Live Captions",
-  "version": "1.0",
-  "description": "Live AI audio translation and captioning for any web video.",
+  "name": "Bhasha Offline Sync",
+  "version": "2.0",
+  "description": "Fetch & Play AI Malayalam Captions for MEC Demo",
   "permissions": [
     "activeTab",
-    "scripting",
-    "tabCapture",
-    "storage"
-],
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.youtube.com/*",
+    "https://*.ngrok-free.dev/*"
+  ],
   "action": {
     "default_popup": "popup.html"
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["*://*.youtube.com/watch*"],
       "js": ["content.js"]
     }
   ]
