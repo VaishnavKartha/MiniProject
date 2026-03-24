@@ -59,7 +59,13 @@ def generate_subtitles(video_path, source_lang="en"):
     p1_start = time.time()
     prompt = "यह एक हिंदी वीडियो है जिसमें कुछ English शब्दों का प्रयोग किया गया है।" if source_lang == "hi" else None
     
-    segments_generator, _ = whisper_model.transcribe(video_path, language=source_lang, initial_prompt=prompt) 
+    segments_generator, _ = whisper_model.transcribe(
+    video_path, 
+    language=source_lang, 
+    initial_prompt=prompt,
+    vad_filter=True,                                   # <-- 1. Turns on silence detection
+    vad_parameters=dict(min_silence_duration_ms=400)   # <-- 2. Tells it to cut any silence longer than 0.4 seconds
+    )
     segments = [{"start": s.start, "end": s.end, "text": s.text} for s in segments_generator]
     p1_end = time.time()
     print(f"✅ [Phase 1] Complete! Found {len(segments)} lines of dialogue.")
