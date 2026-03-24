@@ -1,3 +1,4 @@
+
 import os
 import shutil
 import time
@@ -6,6 +7,11 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from subtitle import generate_subtitles, format_time
+from tts import MalayalamTTS
+from fastapi.responses import StreamingResponse
+from pydub import AudioSegment
+import io
+import base64
 
 app = FastAPI(title="Bhasha Live API - MEC Demo")
 
@@ -13,6 +19,9 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+tts_engine = MalayalamTTS()
+
 
 UPLOAD_DIR = "uploads"
 RESULTS_DIR = "results"
@@ -95,7 +104,7 @@ async def generate(video: UploadFile = File(...), lang: str = Form("en")):
 # ROUTE 2: THE 60-SECOND SEGMENT FETCHER (For the Extension)
 # ---------------------------------------------------------
 @app.post("/get-initial-batch")
-async def get_initial_batch(video_url: str = Form(...), start_time: float = Form(...), lang: str = Form("en")):
+async def get_initial_batch(video_url: str = Form(...), start_time: float = Form(...), lang: str = Form("en"),tts: bool = Form(False)):
     # 1. CLEAN THE URL: Strip out playlists or extra parameters that confuse yt-dlp
     clean_url = video_url.split("&")[0]
     
@@ -145,6 +154,87 @@ async def get_initial_batch(video_url: str = Form(...), start_time: float = Form
     
     # Clean up the temp file
     os.remove(audio_file)
-    
+
+    if tts:
+        tts_clips = []
+        for seg in subtitles:
+            # 1. Calculate the exact slot duration
+            slot_start_ms = int(seg["start"] * 1000)
+            slot_end_ms   = int(seg["end"] * 1000)
+            slot_ms       = slot_end_ms - slot_start_ms
+
+            # 2. Add the missing speaker_id
+            audio_seg = tts_engine.text_to_audio_segment(
+                seg["natural_text"],
+                speaker_id="ritu" 
+            )
+            
+            # 3. Fit the audio to the subtitle slot so the extension plays it perfectly
+            fitted_seg = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
+
+            # 4. Safely export and encode the fitted audio
+            buffer = io.BytesIO()
+            fitted_seg.export(buffer, format="mp3")
+            buffer.seek(0) # Ensure we read from the beginning of the buffer
+            
+            audio_b64 = base64.b64encode(buffer.read()).decode()
+            
+            tts_clips.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "audio_b64": audio_b64   
+            })
+        print(f"✅ [API] Success! Sending {len(subtitles)} JSON captions with {len(tts_clips)} audio clips back to Chrome Extension.\n")
+        return {"status": "success", "start_time": start_time,
+                "captions": subtitles, "tts_clips": tts_clips}
+        
     print(f"✅ [API] Success! Sending {len(subtitles)} JSON captions back to Chrome Extension.\n")
     return {"status": "success", "start_time": start_time, "captions": subtitles}
+    
+    
+    #return {"status": "success", "start_time": start_time, "captions": subtitles}
+
+
+
+@app.post("/generate-dubbed-audio")
+async def generate_dubbed_audio(video: UploadFile = File(...), lang: str = Form("en")):
+    """
+    Runs the full subtitle pipeline, then converts natural Malayalam
+    subtitles to a dubbed audio track using Sarvam Bulbul v3 TTS.
+    Does NOT affect /generate-subtitles or /get-initial-batch.
+    """
+    video_path = f"{UPLOAD_DIR}/{video.filename}"
+    with open(video_path, "wb") as buffer:
+        shutil.copyfileobj(video.file, buffer)
+
+    subtitles, _ = generate_subtitles(video_path, source_lang=lang)
+    os.remove(video_path)
+
+    # Build a silent audio track as long as the last subtitle end time
+    total_duration_ms = int(subtitles[-1]["end"] * 1000)
+    final_audio = AudioSegment.silent(duration=total_duration_ms)
+
+    for seg in subtitles:
+        slot_start_ms = int(seg["start"] * 1000)
+        slot_end_ms   = int(seg["end"] * 1000)
+        slot_ms       = slot_end_ms - slot_start_ms
+
+        # TTS for this line
+        audio_seg = tts_engine.text_to_audio_segment(
+            seg["natural_text"],
+            speaker_id="SPEAKER_00"  # single voice; extend with diarization later
+        )
+
+        # Speed-fit the audio to its subtitle slot
+        fitted = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
+
+        # Overlay onto the silent track at the correct timestamp
+        final_audio = final_audio.overlay(fitted, position=slot_start_ms)
+
+    # Export to MP3 and stream back
+    buffer = io.BytesIO()
+    final_audio.export(buffer, format="mp3")
+    buffer.seek(0)
+
+    return StreamingResponse(buffer, media_type="audio/mpeg",
+                             headers={"Content-Disposition": "attachment; filename=dubbed_malayalam.mp3"})
