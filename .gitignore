@@ -2,6 +2,7 @@
 myenv/
 venv/
 .env/
+.venv/
 
 # Python cache
 __pycache__/
@@ -14,7 +15,11 @@ models/
 # Uploaded videos / generated files
 uploads/
 *.srt
+.env
 
 # OS files
 .DS_Store
 Thumbs.db
+
+full_model_extract/
+model_temp_extract/

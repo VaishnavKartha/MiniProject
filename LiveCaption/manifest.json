@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Bhasha Offline Sync",
+  "version": "2.0",
+  "description": "Fetch & Play AI Malayalam Captions for MEC Demo",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.youtube.com/*",
+    "https://*.ngrok-free.dev/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/watch*"],
+      "js": ["content.js"]
+    }
+  ]
+}
