@@ -196,12 +196,29 @@ async def get_initial_batch(video_url: str = Form(...), start_time: float = Form
 
 
 
+def process_dubbed_tts(seg, tts_engine):
+    """Handles a single dubbed segment for audio composition in an isolated thread."""
+    slot_start_ms = int(seg["start"] * 1000)
+    slot_end_ms   = int(seg["end"] * 1000)
+    slot_ms       = slot_end_ms - slot_start_ms
+
+    # TTS for this line
+    audio_seg = tts_engine.text_to_audio_segment(
+        seg["natural_text"],
+        speaker_id="SPEAKER_00"  # single voice; extend with diarization later
+    )
+
+    # Speed-fit the audio to its subtitle slot
+    fitted = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
+
+    # Return the start time (for positioning) and the raw AudioSegment
+    return slot_start_ms, fitted
+
 @app.post("/generate-dubbed-audio")
 async def generate_dubbed_audio(video: UploadFile = File(...), lang: str = Form("en")):
     """
     Runs the full subtitle pipeline, then converts natural Malayalam
-    subtitles to a dubbed audio track using Sarvam Bulbul v3 TTS.
-    Does NOT affect /generate-subtitles or /get-initial-batch.
+    subtitles to a dubbed audio track using threaded TTS generation.
     """
     video_path = f"{UPLOAD_DIR}/{video.filename}"
     with open(video_path, "wb") as buffer:
@@ -210,31 +227,38 @@ async def generate_dubbed_audio(video: UploadFile = File(...), lang: str = Form(
     subtitles, _ = generate_subtitles(video_path, source_lang=lang)
     os.remove(video_path)
 
-    # Build a silent audio track as long as the last subtitle end time
+    if not subtitles:
+        return JSONResponse({"error": "No subtitles generated"}, status_code=400)
+
+    print(f"⚡ [API] Parallelizing Dubbed TTS generation for {len(subtitles)} segments...")
+    
+    # 1. Fire all TTS generation tasks simultaneously
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(TTS_THREAD_POOL, process_dubbed_tts, seg, tts_engine)
+        for seg in subtitles
+    ]
+    
+    # Wait for all audio clips to finish generating
+    dubbed_clips = await asyncio.gather(*tasks)
+
+    # 2. Build the master audio track
     total_duration_ms = int(subtitles[-1]["end"] * 1000)
     final_audio = AudioSegment.silent(duration=total_duration_ms)
 
-    for seg in subtitles:
-        slot_start_ms = int(seg["start"] * 1000)
-        slot_end_ms   = int(seg["end"] * 1000)
-        slot_ms       = slot_end_ms - slot_start_ms
-
-        # TTS for this line
-        audio_seg = tts_engine.text_to_audio_segment(
-            seg["natural_text"],
-            speaker_id="SPEAKER_00"  # single voice; extend with diarization later
-        )
-
-        # Speed-fit the audio to its subtitle slot
-        fitted = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
-
-        # Overlay onto the silent track at the correct timestamp
-        final_audio = final_audio.overlay(fitted, position=slot_start_ms)
+    # 3. Overlay all the downloaded clips onto the silent track
+    print("🎧 [API] Compositing audio clips into final track...")
+    for slot_start_ms, fitted_seg in dubbed_clips:
+        final_audio = final_audio.overlay(fitted_seg, position=slot_start_ms)
 
     # Export to MP3 and stream back
     buffer = io.BytesIO()
     final_audio.export(buffer, format="mp3")
     buffer.seek(0)
 
-    return StreamingResponse(buffer, media_type="audio/mpeg",
-                             headers={"Content-Disposition": "attachment; filename=dubbed_malayalam.mp3"})
+    print("✅ [API] Dubbed audio complete. Sending to user.\n")
+    return StreamingResponse(
+        buffer, 
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": "attachment; filename=dubbed_malayalam.mp3"}
+    )
