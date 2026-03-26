@@ -1,11 +1,26 @@
 import { Download, FileText, Volume2 } from 'lucide-react';
 
-export default function DownloadBay({ jobId, baseUrl, generateAudio }) {
-  if (!jobId) return null;
+/**
+ * DownloadBay
+ * Downloads files from in-memory Blobs (no server round-trip needed —
+ * the backend returned the file directly in the POST response body).
+ */
+function blobDownload(blob, filename) {
+  if (!blob) return;
+  const url = URL.createObjectURL(blob);
+  const a   = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
 
-  const dl = (path) => {
-    window.open(`${baseUrl}${path}`, '_blank');
-  };
+export default function DownloadBay({ blobs, fileName, generateAudio }) {
+  if (!blobs?.comparison) return null;
+
+  const base = fileName
+    ? fileName.replace(/\.[^.]+$/, '')
+    : 'bhasha_output';
 
   return (
     <div className="download-bay">
@@ -14,7 +29,7 @@ export default function DownloadBay({ jobId, baseUrl, generateAudio }) {
         <button
           id="btn-download-comparison"
           className="btn-download comparison"
-          onClick={() => dl(`/download/${jobId}/comparison`)}
+          onClick={() => blobDownload(blobs.comparison, `${base}_comparison.srt`)}
         >
           <FileText size={16} />
           Download Comparison SRT
@@ -23,7 +38,8 @@ export default function DownloadBay({ jobId, baseUrl, generateAudio }) {
         <button
           id="btn-download-natural"
           className="btn-download natural"
-          onClick={() => dl(`/download/${jobId}/natural`)}
+          onClick={() => blobDownload(blobs.natural, `${base}_natural.srt`)}
+          disabled={!blobs.natural}
         >
           <Download size={16} />
           Download Natural SRT
@@ -33,7 +49,8 @@ export default function DownloadBay({ jobId, baseUrl, generateAudio }) {
           <button
             id="btn-download-audio"
             className="btn-download audio"
-            onClick={() => dl(`/download/${jobId}/audio`)}
+            onClick={() => blobDownload(blobs.audio, `${base}_dubbed.mp3`)}
+            disabled={!blobs.audio}
           >
             <Volume2 size={16} />
             Download Translated Audio (.mp3)

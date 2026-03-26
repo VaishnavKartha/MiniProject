@@ -9,11 +9,29 @@ import LiveTerminal    from './components/LiveTerminal';
 import ProgressBar     from './components/ProgressBar';
 import MetricsPanel    from './components/MetricsPanel';
 import DownloadBay     from './components/DownloadBay';
-import { useSSEJob }   from './hooks/useSSEJob';
+import { useJobApi }   from './hooks/useSSEJob';
 
 const DEFAULT_BASE_URL = 'http://localhost:8000';
 
-/* ─── tiny toast ─────────────────────────────── */
+/* ─── Map of fake terminal lines → which phase they belong to ────── */
+const PHASE_TRIGGERS = {
+  '🎙 Phase 1': 1,
+  '📖 Phase 2': 2,
+  '✨ Phase 3': 3,
+};
+
+function resolvePhase(lines) {
+  let phase = 1;
+  for (const l of lines) {
+    const msg = l._system ?? '';
+    for (const [key, p] of Object.entries(PHASE_TRIGGERS)) {
+      if (msg.startsWith(key)) phase = p;
+    }
+  }
+  return phase;
+}
+
+/* ─── Toast ──────────────────────────────────────────────────────── */
 function Toast({ message, onDismiss }) {
   if (!message) return null;
   return (
@@ -29,56 +47,50 @@ function Toast({ message, onDismiss }) {
   );
 }
 
-/* ─── main app ───────────────────────────────── */
+/* ─── App ─────────────────────────────────────────────────────────── */
 export default function App() {
-  const [baseUrl, setBaseUrl]           = useState(DEFAULT_BASE_URL);
-  const [file, setFile]                 = useState(null);
-  const [sourceLang, setSourceLang]     = useState('english');
-  const [generateAudio, setGenerateAudio] = useState(false);
-  const [jobId, setJobId]               = useState(null);
-  const [startedAt, setStartedAt]       = useState(null);
-  const [toast, setToast]               = useState('');
+  const [baseUrl,        setBaseUrl]        = useState(DEFAULT_BASE_URL);
+  const [file,           setFile]           = useState(null);
+  const [sourceLang,     setSourceLang]     = useState('en');   // "en" | "hi"
+  const [generateAudio,  setGenerateAudio]  = useState(false);
+  const [startedAt,      setStartedAt]      = useState(null);
+  const [toast,          setToast]          = useState('');
 
   const {
-    status, phase, lines, progress, metrics, errorMsg,
+    status, progress, termLines, metrics, blobs, errorMsg,
     startJob, cancelJob, reset,
-  } = useSSEJob(baseUrl);
+  } = useJobApi(baseUrl);
 
-  /* Crude estimate: MP4/MOV ~1MB/s at 30fps low-res → duration ≈ filesize/1_000_000 */
-  const fileDurationSec = file
-    ? Math.max(10, (file.size / 1_000_000) * 0.9)
-    : null;
+  /* Crude duration estimate: ~1 MB/s video = 1 s/MB */
+  const fileDurationSec = file ? Math.max(10, file.size / 1_000_000 * 0.9) : null;
 
   const handleStart = async () => {
     if (!file) { setToast('Please select a video or audio file first.'); return; }
-    setJobId(null);
     setStartedAt(Date.now());
-
-    // startJob resolves after upload; jobId comes back via SSE "done" metrics
-    await startJob({ file, sourceLang, generateAudio });
+    await startJob({ file, lang: sourceLang, generateAudio, fileDurationSec });
   };
 
   const handleCancel = () => {
     cancelJob();
-    setJobId(null);
     setStartedAt(null);
   };
 
-  // Capture job_id from metrics event if backend sends it there, or from POST response.
-  // We expose a simple prop for it via a workaround: store from errorMsg data or metrics.
-  // If your backend sends job_id inside the 'done' SSE event, handle here:
-  // (The useSSEJob hook already exposes `metrics`; adapt as needed)
-  const resolvedJobId = jobId ?? (metrics?.job_id ?? null);
+  const handleReset = () => {
+    reset();
+    setFile(null);
+    setStartedAt(null);
+  };
 
-  const isProcessing = status === 'uploading' || status === 'streaming';
+  const isProcessing = status === 'uploading' || status === 'processing';
   const isDone       = status === 'done';
   const isIdle       = status === 'idle';
 
-  // Show error as toast
+  const activePhase = resolvePhase(termLines);
   const activeToast = toast || (status === 'error' ? errorMsg : '');
 
   return (
     <div className="app-shell">
+
       {/* ── Header ── */}
       <header className="app-header">
         <div className="logo-block">
@@ -96,7 +108,7 @@ export default function App() {
       {/* ── Main ── */}
       <main className="app-main">
 
-        {/* ══ ZONE 1: Input (visible when idle or processing) ══ */}
+        {/* ══ ZONE 1: Input ══ */}
         {(isIdle || isProcessing) && (
           <section className="zone-section">
             <DropZone
@@ -121,15 +133,15 @@ export default function App() {
                 disabled={isProcessing || !file}
               >
                 <span className="btn-inner">
-                  {status === 'uploading' ? (
+                  {isProcessing ? (
                     <>
                       <span style={{
-                        display:'inline-block', width:18, height:18,
-                        border:'2px solid rgba(255,255,255,0.3)',
-                        borderTopColor:'#fff', borderRadius:'50%',
-                        animation:'spin 0.7s linear infinite'
+                        display: 'inline-block', width: 18, height: 18,
+                        border: '2px solid rgba(255,255,255,0.3)',
+                        borderTopColor: '#fff', borderRadius: '50%',
+                        animation: 'spin 0.7s linear infinite',
                       }} />
-                      Uploading…
+                      Processing…
                     </>
                   ) : (
                     <>
@@ -151,15 +163,15 @@ export default function App() {
 
         {/* ══ ZONE 2: Processing Engine ══ */}
         {(isProcessing || isDone) && (
-          <section className="zone-section" style={{ marginTop: isIdle ? 0 : 28 }}>
+          <section className="zone-section" style={{ marginTop: 28 }}>
             <div className="section-divider">
               <span>⚙ Processing Engine</span>
             </div>
 
-            <PipelineStepper activePhase={isDone ? 4 : phase} />
+            <PipelineStepper activePhase={isDone ? 4 : activePhase} />
 
             <div style={{ marginTop: 16 }}>
-              <LiveTerminal lines={lines} isLive={isProcessing} />
+              <LiveTerminal lines={termLines} isLive={isProcessing} />
             </div>
 
             <ProgressBar
@@ -170,19 +182,19 @@ export default function App() {
           </section>
         )}
 
-        {/* ══ ZONE 3: Analytics & Output Hub ══ */}
+        {/* ══ ZONE 3: Analytics & Output ══ */}
         {isDone && (
           <section className="zone-section" style={{ marginTop: 28 }}>
             <div className="section-divider">
-              <span>📊 Analytics & Output</span>
+              <span>📊 Analytics &amp; Output</span>
             </div>
 
             <MetricsPanel metrics={metrics} />
 
             <div style={{ marginTop: 16 }}>
               <DownloadBay
-                jobId={resolvedJobId}
-                baseUrl={baseUrl}
+                blobs={blobs}
+                fileName={file?.name}
                 generateAudio={generateAudio}
               />
             </div>
@@ -192,7 +204,7 @@ export default function App() {
                 id="btn-new-job"
                 className="btn-ignite"
                 style={{ maxWidth: 260, margin: '0 auto' }}
-                onClick={() => { reset(); setFile(null); setJobId(null); setStartedAt(null); }}
+                onClick={handleReset}
               >
                 <span className="btn-inner">
                   <Sparkles size={16} /> Process Another File
@@ -204,7 +216,7 @@ export default function App() {
 
       </main>
 
-      {/* ── Global Toast ── */}
+      {/* ── Toast ── */}
       <Toast message={activeToast} onDismiss={() => setToast('')} />
     </div>
   );

@@ -1,13 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 
-/**
- * ConnectivityDot – top-right header widget
- * Pings `baseUrl/health` every 5 s and shows online/offline status.
- * Also renders the ngrok URL input.
- */
 export default function ConnectivityDot({ baseUrl, onBaseUrlChange }) {
-  const [status, setStatus] = useState('checking'); // checking | online | offline
-  const inputRef = useRef(null);
+  const [status, setStatus] = useState('checking');
 
   useEffect(() => {
     let cancelled = false;
@@ -15,7 +9,11 @@ export default function ConnectivityDot({ baseUrl, onBaseUrlChange }) {
     const ping = async () => {
       setStatus('checking');
       try {
-        const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(4000) });
+        // /docs is always served by FastAPI — safe ping target
+        const res = await fetch(`${baseUrl}/docs`, {
+          signal: AbortSignal.timeout(4000),
+          method: 'HEAD',
+        });
         if (!cancelled) setStatus(res.ok ? 'online' : 'offline');
       } catch {
         if (!cancelled) setStatus('offline');
@@ -27,19 +25,22 @@ export default function ConnectivityDot({ baseUrl, onBaseUrlChange }) {
     return () => { cancelled = true; clearInterval(id); };
   }, [baseUrl]);
 
-  const label = { checking: 'Checking…', online: 'Backend Online', offline: 'Connection Lost' }[status];
+  const label = {
+    checking: 'Checking…',
+    online:   'Backend Online',
+    offline:  'Connection Lost',
+  }[status];
 
   return (
     <div className="connectivity-block">
       <input
-        ref={inputRef}
         className="url-input"
         type="text"
         placeholder="https://xxxx.ngrok-free.app"
         defaultValue={baseUrl}
-        onBlur={(e) => onBaseUrlChange(e.target.value.replace(/\/$/, ''))}
+        onBlur={(e)  => onBaseUrlChange(e.target.value.replace(/\/$/, ''))}
         onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-        title="Backend base URL (your Kaggle/Ngrok tunnel)"
+        title="Backend base URL (Kaggle / Ngrok tunnel)"
       />
       <div className="conn-status">
         <span className={`conn-dot ${status}`} />

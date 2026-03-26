@@ -10,8 +10,9 @@ export default function ConfigBar({ sourceLang, onSourceLang, generateAudio, onG
           onChange={e => onSourceLang(e.target.value)}
           disabled={disabled}
         >
-          <option value="english">English</option>
-          <option value="hindi">Hindi / Hinglish</option>
+          {/* Values match the backend `lang` form field exactly */}
+          <option value="en">English</option>
+          <option value="hi">Hindi / Hinglish</option>
         </select>
       </div>
 
@@ -31,7 +32,9 @@ export default function ConfigBar({ sourceLang, onSourceLang, generateAudio, onG
           <span className="toggle-label-text">Generate Malayalam Audio Track</span>
         </label>
         <span className="toggle-subtext">
-          {generateAudio ? '⚡ Audio synthesis enabled — increases processing time' : 'Subtitles only'}
+          {generateAudio
+            ? '⚡ Audio synthesis enabled — calls /generate-dubbed-audio (increases processing time)'
+            : 'Subtitles only — calls /generate-subtitles'}
         </span>
       </div>
     </div>
