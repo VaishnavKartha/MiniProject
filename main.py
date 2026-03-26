@@ -1,4 +1,3 @@
-
 import os
 import shutil
 import time
@@ -12,8 +11,11 @@ from fastapi.responses import StreamingResponse
 from pydub import AudioSegment
 import io
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 app = FastAPI(title="Bhasha Live API - MEC Demo")
+TTS_THREAD_POOL = ThreadPoolExecutor(max_workers=5)
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
@@ -27,8 +29,6 @@ UPLOAD_DIR = "uploads"
 RESULTS_DIR = "results"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
-
-# Helper function for the metrics table
 def sec_to_min_sec(seconds):
     """Converts raw seconds into a human-readable 'X min Y sec' format."""
     m = int(seconds // 60)
@@ -100,12 +100,37 @@ async def generate(video: UploadFile = File(...), lang: str = Form("en")):
     print(f"✅ Cleanup complete. Sending {combined_path} to user.\n")
     return FileResponse(combined_path, media_type="text/plain", filename=f"{base_name}_comparison.srt")
 
+def process_single_tts(seg, tts_engine):
+    """Handles a single subtitle segment in an isolated thread."""
+    slot_start_ms = int(seg["start"] * 1000)
+    slot_end_ms   = int(seg["end"] * 1000)
+    slot_ms       = slot_end_ms - slot_start_ms
+
+    # Generate Audio
+    audio_seg = tts_engine.text_to_audio_segment(
+        seg["natural_text"],
+        speaker_id="ritu" 
+    )
+    
+    # Fit Audio
+    fitted_seg = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
+
+    # Export Audio (Using a lower bitrate speeds up the export massively)
+    buffer = io.BytesIO()
+    fitted_seg.export(buffer, format="mp3", bitrate="64k") 
+    buffer.seek(0)
+    
+    return {
+        "start": seg["start"],
+        "end": seg["end"],
+        "audio_b64": base64.b64encode(buffer.read()).decode()
+    }
+
 # ---------------------------------------------------------
 # ROUTE 2: THE 60-SECOND SEGMENT FETCHER (For the Extension)
 # ---------------------------------------------------------
 @app.post("/get-initial-batch")
 async def get_initial_batch(video_url: str = Form(...), start_time: float = Form(...), lang: str = Form("en"),tts: bool = Form(False)):
-    # 1. CLEAN THE URL: Strip out playlists or extra parameters that confuse yt-dlp
     clean_url = video_url.split("&")[0]
     
     end_time = start_time + 60
@@ -121,19 +146,29 @@ async def get_initial_batch(video_url: str = Form(...), start_time: float = Form
     
     print(f"📥 [yt-dlp] Extracting pure audio track over network...")
     
-    # 2. THE ANTI-BOT COMMAND: Android client spoofing is the gold standard for Kaggle/Colab
+    print(f"📥 [yt-dlp] Fetching video title...")
+    title_command = [
+        "yt-dlp", 
+        "--get-title", 
+        "--no-check-certificate", 
+        clean_url
+    ]
+    title_result = subprocess.run(title_command, capture_output=True, text=True)
+    video_title = title_result.stdout.strip() if title_result.returncode == 0 else "Unknown Video"
+    print(f"🎬 Title Found: {video_title}")
+
+    print(f"📥 [yt-dlp] Extracting pure audio track over network...")
     command = [
         "yt-dlp", 
         "-x", "--audio-format", "mp3", 
         "--download-sections", f"*{start_time}-{end_time}", 
         "--force-overwrites", 
         "--no-check-certificate", 
-        "--extractor-args", "youtube:player_client=android,web",  # <-- THE MAGIC BYPASS
+        "--extractor-args", "youtube:player_client=android,web",
         "-o", audio_file, 
         clean_url
     ]
     
-    # 3. CAPTURE REAL ERRORS: Do not use DEVNULL. We need to see what YouTube is doing.
     result = subprocess.run(command, capture_output=True, text=True)
     
     if result.returncode != 0:
@@ -149,41 +184,22 @@ async def get_initial_batch(video_url: str = Form(...), start_time: float = Form
 
     print("✅ [yt-dlp] Audio slice saved locally. Triggering AI Pipeline...")
     
-    # Process the slice through the unified pipeline
-    subtitles, _ = generate_subtitles(audio_file, source_lang=lang)
+    # --- 3. PASS THE TITLE TO THE PIPELINE ---
+    subtitles, _ = generate_subtitles(audio_file, source_lang=lang, video_title=video_title)
     
-    # Clean up the temp file
     os.remove(audio_file)
 
     if tts:
-        tts_clips = []
-        for seg in subtitles:
-            # 1. Calculate the exact slot duration
-            slot_start_ms = int(seg["start"] * 1000)
-            slot_end_ms   = int(seg["end"] * 1000)
-            slot_ms       = slot_end_ms - slot_start_ms
-
-            # 2. Add the missing speaker_id
-            audio_seg = tts_engine.text_to_audio_segment(
-                seg["natural_text"],
-                speaker_id="ritu" 
-            )
-            
-            # 3. Fit the audio to the subtitle slot so the extension plays it perfectly
-            fitted_seg = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
-
-            # 4. Safely export and encode the fitted audio
-            buffer = io.BytesIO()
-            fitted_seg.export(buffer, format="mp3")
-            buffer.seek(0) # Ensure we read from the beginning of the buffer
-            
-            audio_b64 = base64.b64encode(buffer.read()).decode()
-            
-            tts_clips.append({
-                "start": seg["start"],
-                "end": seg["end"],
-                "audio_b64": audio_b64   
-            })
+        print(f"⚡ [API] Parallelizing TTS generation for {len(subtitles)} segments...")
+        loop = asyncio.get_running_loop()
+        
+        tasks = [
+            loop.run_in_executor(TTS_THREAD_POOL, process_single_tts, seg, tts_engine) 
+            for seg in subtitles
+        ]
+        
+        tts_clips = await asyncio.gather(*tasks)
+        
         print(f"✅ [API] Success! Sending {len(subtitles)} JSON captions with {len(tts_clips)} audio clips back to Chrome Extension.\n")
         return {"status": "success", "start_time": start_time,
                 "captions": subtitles, "tts_clips": tts_clips}
@@ -192,9 +208,6 @@ async def get_initial_batch(video_url: str = Form(...), start_time: float = Form
     return {"status": "success", "start_time": start_time, "captions": subtitles}
     
     
-    #return {"status": "success", "start_time": start_time, "captions": subtitles}
-
-
 
 def process_dubbed_tts(seg, tts_engine):
     """Handles a single dubbed segment for audio composition in an isolated thread."""
@@ -202,16 +215,13 @@ def process_dubbed_tts(seg, tts_engine):
     slot_end_ms   = int(seg["end"] * 1000)
     slot_ms       = slot_end_ms - slot_start_ms
 
-    # TTS for this line
     audio_seg = tts_engine.text_to_audio_segment(
         seg["natural_text"],
-        speaker_id="SPEAKER_00"  # single voice; extend with diarization later
+        speaker_id="SPEAKER_00" 
     )
 
-    # Speed-fit the audio to its subtitle slot
     fitted = tts_engine.fit_audio_to_slot(audio_seg, slot_ms)
 
-    # Return the start time (for positioning) and the raw AudioSegment
     return slot_start_ms, fitted
 
 @app.post("/generate-dubbed-audio")
@@ -232,26 +242,21 @@ async def generate_dubbed_audio(video: UploadFile = File(...), lang: str = Form(
 
     print(f"⚡ [API] Parallelizing Dubbed TTS generation for {len(subtitles)} segments...")
     
-    # 1. Fire all TTS generation tasks simultaneously
     loop = asyncio.get_running_loop()
     tasks = [
         loop.run_in_executor(TTS_THREAD_POOL, process_dubbed_tts, seg, tts_engine)
         for seg in subtitles
     ]
     
-    # Wait for all audio clips to finish generating
     dubbed_clips = await asyncio.gather(*tasks)
 
-    # 2. Build the master audio track
     total_duration_ms = int(subtitles[-1]["end"] * 1000)
     final_audio = AudioSegment.silent(duration=total_duration_ms)
 
-    # 3. Overlay all the downloaded clips onto the silent track
     print("🎧 [API] Compositing audio clips into final track...")
     for slot_start_ms, fitted_seg in dubbed_clips:
         final_audio = final_audio.overlay(fitted_seg, position=slot_start_ms)
 
-    # Export to MP3 and stream back
     buffer = io.BytesIO()
     final_audio.export(buffer, format="mp3")
     buffer.seek(0)

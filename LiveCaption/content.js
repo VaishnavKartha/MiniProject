@@ -1,17 +1,14 @@
-// --- CONFIGURATION ---
-// ⚠️ PASTE YOUR CURRENT NGROK HTTPS URL HERE ⚠️
 const API_BASE_URL = "https://unabstractive-surgeonless-jennette.ngrok-free.dev";
 
 let subtitles = [];
-let audioClips = [];       // { start, end, buffer: AudioBuffer, played: bool }
+let audioClips = [];       
 let currentLang = "en";
 let ttsEnabled = false;
 let isFetching = false;
 let ytVideo = null;
-let audioCtx = null;       // single shared AudioContext
-let activeSource = null;   // currently playing AudioBufferSourceNode
+let audioCtx = null;       
+let activeSource = null;  
 
-// A strict registry to track exactly which 60s blocks we have downloaded
 let completedChunks = new Set();
 let fetchingChunks = new Set();
 let isWaitingForData = false;
@@ -74,11 +71,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         currentLang = request.lang;
         ttsEnabled = request.tts || false;
         
-        // Reset all data arrays
         subtitles = [];
         audioClips = [];
         
-        // ✅ NEW WAY: Clear our updated tracking sets instead of downloadedChunks
         completedChunks.clear();
         fetchingChunks.clear();
         isWaitingForData = false;
@@ -86,7 +81,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         ytVideo.muted = false;
         stopActiveSource();
 
-        // Create AudioContext on user gesture
         if (ttsEnabled) {
             if (!audioCtx || audioCtx.state === 'closed') {
                 audioCtx = new AudioContext();
@@ -99,8 +93,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         const startChunk = Math.floor(ytVideo.currentTime / 60) * 60;
         
-        // We removed downloadedChunks.add(startChunk) here because 
-        // the new fetchSegment() handles adding it to fetchingChunks automatically.
         fetchSegment(startChunk, false);
 
         setupVideoListeners();
@@ -108,7 +100,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ status: "started" });
     }
     
-    // Keep the port open just in case!
     return true; 
 });
 
@@ -130,7 +121,6 @@ async function fetchSegment(startTime, isBackground = false) {
         formData.append("lang", currentLang);
         formData.append("tts", ttsEnabled ? "true" : "false");
 
-        // UI Update: Request sent, waiting for processing
         if (!isBackground) {
             captionText.innerText = ttsEnabled 
                 ? `⏳ Extracting Audio & Generating Captions...` 
@@ -144,7 +134,6 @@ async function fetchSegment(startTime, isBackground = false) {
 
         if (!response.ok) throw new Error("Backend server error");
 
-        // UI Update: Server responded, downloading payload
         if (!isBackground) {
             captionText.innerText = "📥 Downloading Data...";
         }
@@ -164,7 +153,6 @@ async function fetchSegment(startTime, isBackground = false) {
                 audioClips = audioClips.concat(decoded);
             }
 
-            // Mark as complete
             completedChunks.add(startTime);
             fetchingChunks.delete(startTime);
 
@@ -175,11 +163,9 @@ async function fetchSegment(startTime, isBackground = false) {
                     captionText.style.color = "#FFD700";
                     captionText.innerText = "";
                     if (ttsEnabled) ytVideo.muted = true;
-                    // Only force play if we aren't background buffering
                     ytVideo.play();
                 }, 1000);
             } else if (isWaitingForData) {
-                // AUTO-RESUME: If the video was paused waiting for this background chunk
                 isWaitingForData = false;
                 captionText.innerText = "";
                 ytVideo.play();
@@ -213,7 +199,7 @@ function setupVideoListeners() {
             if (!fetchingChunks.has(currentChunk)) {
                 fetchSegment(currentChunk, false);
             }
-            return; // Stop updating captions/audio while we wait
+            return;
         }
 
         // 2. CAPTION DISPLAY
@@ -229,7 +215,6 @@ function setupVideoListeners() {
             captionText.innerText = activeCaption;
             captionContainer.style.display = 'block';
         } else {
-            // Only hide if we aren't displaying a status message
             if (!isWaitingForData && !fetchingChunks.size) {
                 captionText.innerText = "";
             }
@@ -246,7 +231,6 @@ function setupVideoListeners() {
                     source.buffer = clip.buffer;
                     source.connect(audioCtx.destination);
                     
-                    // CALCULATE OFFSET: Start audio exactly where the video is
                     const offset = Math.max(0, currentSecs - clip.start);
                     source.start(0, offset);
                     
@@ -258,7 +242,7 @@ function setupVideoListeners() {
 
         // 4. BACKGROUND BUFFERING
         const nextChunk = currentChunk + 60;
-        if ((nextChunk - currentSecs < 50) && currentSecs < ytVideo.duration) {
+        if ((nextChunk - currentSecs < 50) && nextChunk < ytVideo.duration) {
             if (!completedChunks.has(nextChunk) && !fetchingChunks.has(nextChunk)) {
                 fetchSegment(nextChunk, true);
             }
@@ -270,7 +254,6 @@ function setupVideoListeners() {
         const seekTime = ytVideo.currentTime;
         const seekChunk = Math.floor(seekTime / 60) * 60;
 
-        // Reset all clips so the ones after the seek point can be played again
         for (let clip of audioClips) {
             clip.played = clip.end < seekTime;
         }
@@ -283,8 +266,6 @@ function setupVideoListeners() {
 
     ytVideo.onpause = () => {
         stopActiveSource();
-        // FIX SILENCE BUG: If user pauses, we must un-mark the current clip 
-        // so it restarts (from the right offset) when they hit play again.
         const currentSecs = ytVideo.currentTime;
         for (let clip of audioClips) {
             if (currentSecs >= clip.start && currentSecs <= clip.end) {

@@ -11,7 +11,7 @@ import MetricsPanel    from './components/MetricsPanel';
 import DownloadBay     from './components/DownloadBay';
 import { useJobApi }   from './hooks/useSSEJob';
 
-const DEFAULT_BASE_URL = 'http://localhost:8000';
+const DEFAULT_BASE_URL = 'https://unabstractive-surgeonless-jennette.ngrok-free.dev';
 
 /* ─── Map of fake terminal lines → which phase they belong to ────── */
 const PHASE_TRIGGERS = {

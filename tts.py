@@ -1,5 +1,3 @@
-
-
 """
 tts.py — Malayalam TTS using Sarvam Bulbul v3.
 Free tier: ₹1000 credits on signup (~100+ videos worth).
@@ -13,6 +11,7 @@ import requests
 import os
 from pydub import AudioSegment
 from dotenv import load_dotenv 
+from pydub.effects import speedup
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -29,7 +28,7 @@ print(ALL_VOICES)
 
 class MalayalamTTS:
     def __init__(self):
-        self.api_key = os.getenv("SARVAM_API_KEY")  # ← replace with your key
+        self.api_key = os.getenv("SARVAM_API_KEY") 
         self._speaker_index: dict[str, int] = {}
         self._next_index = 0
         logger.info("Sarvam Bulbul v3 TTS ready")
@@ -44,7 +43,7 @@ class MalayalamTTS:
         if not text.strip():
             return AudioSegment.silent(duration=200)
 
-        # Get the voice and force it to lowercase for the API
+
         voice = self._get_voice(speaker_id).lower()
 
         try:
@@ -55,17 +54,13 @@ class MalayalamTTS:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "text": text,                    # FIXED: Changed 'inputs: [text]' to 'text: text'
                     "target_language_code": "ml-IN", 
-                    "speaker": voice,                # FIXED: Now strictly lowercase
                     "model": "bulbul:v3",
                     "pace": 1.0
-                    # Removed "enable_preprocessing" (Bulbul v3 does this automatically)
                 },
                 timeout=30,
             )
             
-            # This will print the exact Sarvam error message to your console if it fails again
             if response.status_code != 200:
                 logger.error(f"Sarvam API Error: {response.text}")
                 
@@ -81,8 +76,18 @@ class MalayalamTTS:
     def fit_audio_to_slot(self, audio: AudioSegment, slot_ms: int) -> AudioSegment:
         if slot_ms <= 0 or len(audio) <= slot_ms:
             return audio
+            
         speed_ratio = min(len(audio) / slot_ms, 2.0)
-        return audio._spawn(
-            audio.raw_data,
-            overrides={"frame_rate": int(audio.frame_rate * speed_ratio)},
-        ).set_frame_rate(audio.frame_rate)
+        
+        try:
+
+            fitted_audio = speedup(audio, playback_speed=speed_ratio, chunk_size=50, crossfade=25)
+            
+            return fitted_audio[:slot_ms]
+            
+        except Exception as e:
+            logger.warning(f"Pitch-preserving speedup failed, falling back to raw stretch: {e}")
+            return audio._spawn(
+                audio.raw_data,
+                overrides={"frame_rate": int(audio.frame_rate * speed_ratio)},
+            ).set_frame_rate(audio.frame_rate)
