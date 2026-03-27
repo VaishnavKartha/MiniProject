@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Clock } from 'lucide-react';
 
-/**
- * RTF ≈ 0.2 means for a 60s video → ~12s processing time.
- * fileDuration is in seconds (optional, estimated from file size if not provided).
- */
 const ESTIMATED_RTF = 0.22;
 
 function formatCountdown(secs) {

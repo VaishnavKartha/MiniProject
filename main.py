@@ -57,12 +57,23 @@ async def generate(video: UploadFile = File(...), lang: str = Form("en")):
     
     # Run the pipeline
     subtitles, phase_times = generate_subtitles(video_path, source_lang=lang)
+    os.remove(video_path) 
+
+    if not subtitles:
+        return JSONResponse({"error": "No subtitles generated"}, status_code=400)
 
     # Calculate Metrics
     end_time = time.time()
     processing_time = end_time - start_time
     video_duration = subtitles[-1]["end"] if subtitles else 0
     rtf = processing_time / video_duration if video_duration > 0 else 0
+
+    metrics = {
+        "video_duration": video_duration,
+        "processing_time": processing_time,
+        "rtf": round(rtf, 2),
+        "phase_times": phase_times
+    }
 
     print("\n" + "="*55)
     print("📊 PIPELINE PERFORMANCE METRICS")
@@ -80,25 +91,19 @@ async def generate(video: UploadFile = File(...), lang: str = Form("en")):
         print(f"🐢 (Processed slower than real-time)")
     print("="*55 + "\n")
 
-    print("📁 Generating local SRT files...")
-    base_name = os.path.splitext(video.filename)[0]
-    natural_path = os.path.join(RESULTS_DIR, f"{base_name}_{lang}_natural.srt")
-    combined_path = os.path.join(RESULTS_DIR, f"{base_name}_{lang}_comparison.srt")
-
-    with open(natural_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(subtitles, 1):
-            f.write(f"{i}\n{format_time(seg['start'])} --> {format_time(seg['end'])}\n{seg['natural_text']}\n\n")
-
-    with open(combined_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(subtitles, 1):
-            f.write(f"{i}\n{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
-            f.write(f"[{lang.upper()}]: {seg['source_text']}\n\n")
-            f.write(f"[FORMAL]: {seg['formal_text']}\n\n")
-            f.write(f"[NATURAL]: {seg['natural_text']}\n\n\n")
-
-    os.remove(video_path) 
-    print(f"✅ Cleanup complete. Sending {combined_path} to user.\n")
-    return FileResponse(combined_path, media_type="text/plain", filename=f"{base_name}_comparison.srt")
+    natural_srt = ""
+    comparison_srt = ""
+    for i, seg in enumerate(subtitles, 1):
+        time_block = f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n"
+        natural_srt += f"{i}\n{time_block}{seg['natural_text']}\n\n"
+        comparison_srt += f"{i}\n{time_block}[{lang.upper()}]: {seg['source_text']}\n[FORMAL]: {seg['formal_text']}\n[NATURAL]: {seg['natural_text']}\n\n"
+        
+    return JSONResponse({
+        "status": "success",
+        "comparison_srt": comparison_srt,
+        "natural_srt": natural_srt,
+        "metrics": metrics
+    })
 
 def process_single_tts(seg, tts_engine):
     """Handles a single subtitle segment in an isolated thread."""
@@ -234,14 +239,23 @@ async def generate_dubbed_audio(video: UploadFile = File(...), lang: str = Form(
     with open(video_path, "wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
 
-    subtitles, _ = generate_subtitles(video_path, source_lang=lang)
+    start_time = time.time()
+
+    subtitles, phase_times = generate_subtitles(video_path, source_lang=lang)
     os.remove(video_path)
 
     if not subtitles:
         return JSONResponse({"error": "No subtitles generated"}, status_code=400)
+    
+    natural_srt = ""
+    comparison_srt = ""
+    for i, seg in enumerate(subtitles, 1):
+        time_block = f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n"
+        natural_srt += f"{i}\n{time_block}{seg['natural_text']}\n\n"
+        comparison_srt += f"{i}\n{time_block}[{lang.upper()}]: {seg['source_text']}\n[FORMAL]: {seg['formal_text']}\n[NATURAL]: {seg['natural_text']}\n\n"
 
     print(f"⚡ [API] Parallelizing Dubbed TTS generation for {len(subtitles)} segments...")
-    
+    tts_start = time.time()
     loop = asyncio.get_running_loop()
     tasks = [
         loop.run_in_executor(TTS_THREAD_POOL, process_dubbed_tts, seg, tts_engine)
@@ -260,10 +274,45 @@ async def generate_dubbed_audio(video: UploadFile = File(...), lang: str = Form(
     buffer = io.BytesIO()
     final_audio.export(buffer, format="mp3")
     buffer.seek(0)
+    audio_b64 = base64.b64encode(buffer.read()).decode('utf-8')
+
+    tts_end = time.time()
+    phase_times["p4"] = tts_end - tts_start
+
+    end_time = time.time()
+    processing_time = end_time - start_time
+    video_duration = subtitles[-1]["end"] if subtitles else 0
+    rtf = processing_time / video_duration if video_duration > 0 else 0
+
+    metrics = {
+        "video_duration": video_duration,
+        "processing_time": processing_time,
+        "rtf": round(rtf, 2),
+        "phase_times": phase_times
+    }
+
+    print("\n" + "="*55)
+    print("📊 PIPELINE PERFORMANCE METRICS")
+    print("="*55)
+    print(f"🎞️  Audio Duration    : {sec_to_min_sec(video_duration)}")
+    print(f"⏱️  Total Processing  : {sec_to_min_sec(processing_time)}")
+    print(f"   ├─ 🎙️ Whisper (Ph1) : {sec_to_min_sec(phase_times['p1'])}")
+    print(f"   ├─ 🧠 Indic (Ph2)   : {sec_to_min_sec(phase_times['p2'])}")
+    print(f"   ├─ 🌐 Groq (Ph3)    : {sec_to_min_sec(phase_times['p3'])}")
+    print(f"   └─ 🔊 TTS Audio(Ph4): {sec_to_min_sec(phase_times['p4'])}")
+    print(f"⚡ Real-Time Factor  : {rtf:.2f}x")
+    
+    if rtf < 1.0:
+        print(f"🚀 (Awesome! Processed faster than real-time)")
+    else:
+        print(f"🐢 (Processed slower than real-time)")
+    print("="*55 + "\n")
 
     print("✅ [API] Dubbed audio complete. Sending to user.\n")
-    return StreamingResponse(
-        buffer, 
-        media_type="audio/mpeg",
-        headers={"Content-Disposition": "attachment; filename=dubbed_malayalam.mp3"}
-    )
+    return JSONResponse({
+        "status": "success",
+        "audio_base64": audio_b64,
+        "comparison_srt": comparison_srt,
+        "natural_srt": natural_srt,
+        "metrics": metrics
+    })

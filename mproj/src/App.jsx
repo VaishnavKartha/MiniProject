@@ -13,11 +13,11 @@ import { useJobApi }   from './hooks/useSSEJob';
 
 const DEFAULT_BASE_URL = 'https://unabstractive-surgeonless-jennette.ngrok-free.dev';
 
-/* ─── Map of fake terminal lines → which phase they belong to ────── */
 const PHASE_TRIGGERS = {
   '🎙 Phase 1': 1,
   '📖 Phase 2': 2,
   '✨ Phase 3': 3,
+  '🔊 Phase 4': 4,
 };
 
 function resolvePhase(lines) {
@@ -61,7 +61,6 @@ export default function App() {
     startJob, cancelJob, reset,
   } = useJobApi(baseUrl);
 
-  /* Crude duration estimate: ~1 MB/s video = 1 s/MB */
   const fileDurationSec = file ? Math.max(10, file.size / 1_000_000 * 0.9) : null;
 
   const handleStart = async () => {
@@ -168,7 +167,11 @@ export default function App() {
               <span>⚙ Processing Engine</span>
             </div>
 
-            <PipelineStepper activePhase={isDone ? 4 : activePhase} />
+            {/* Pass generateAudio, and dynamically set the "Done" integer */}
+            <PipelineStepper 
+              activePhase={isDone ? (generateAudio ? 5 : 4) : activePhase} 
+              generateAudio={generateAudio} 
+            />
 
             <div style={{ marginTop: 16 }}>
               <LiveTerminal lines={termLines} isLive={isProcessing} />

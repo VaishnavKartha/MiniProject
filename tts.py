@@ -54,6 +54,8 @@ class MalayalamTTS:
                     "Content-Type": "application/json",
                 },
                 json={
+                    "inputs": [text],            
+                    "speaker": voice,
                     "target_language_code": "ml-IN", 
                     "model": "bulbul:v3",
                     "pace": 1.0
